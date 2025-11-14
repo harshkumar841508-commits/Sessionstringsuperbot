@@ -1,92 +1,119 @@
-from flask import Flask, request, render_template_string
-from pyrogram import Client
-import os
 import asyncio
+from pyrogram import Client, filters
+from pyrogram.types import Message
 
-API_ID = int(os.getenv("API_ID"))
-API_HASH = os.getenv("API_HASH")
+# ========================
+# FIXED USER VARIABLES
+# ========================
+API_ID = 24916176
+API_HASH = "15e8847a5d612831b6a42c5f8d846a8a"
+BOT_TOKEN = "8296735009:AAFZ0kD-6e2bayRxSasUOO_DUS-GXYjtiZU"
 
-app = Flask(__name__)
-app.secret_key = os.getenv("SECRET_KEY", "mysafekey123")
+bot = Client(
+    "session_gen_bot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN
+)
 
-
-html_home = """
-<h2>Telegram Session String Generator</h2>
-<form method="POST" action="/send_code">
-  <label>Phone Number (with country code):</label><br>
-  <input name="phone" placeholder="+91XXXXXXXXXX" required>
-  <button type="submit">Send Code</button>
-</form>
-"""
-
-
-html_code = """
-<h2>Enter the Code Received on Telegram</h2>
-<form method="POST" action="/verify_code">
-  <input type="hidden" name="phone" value="{{phone}}">
-  <label>Code:</label><br>
-  <input name="code" placeholder="12345" required>
-  <br><br>
-  <label>2FA Password (if enabled):</label><br>
-  <input name="password" placeholder="Leave empty if none">
-  <br><br>
-  <button type="submit">Generate Session</button>
-</form>
-"""
+# Temporary user storage
+user_data = {}
 
 
-html_result = """
-<h2>Session String Generated Successfully 🎉</h2>
-<textarea style="width:100%; height:200px;">{{session}}</textarea>
-<br><br>
-<strong>Copy and save it safely!</strong>
-"""
+@bot.on_message(filters.command("start") & filters.private)
+async def start_cmd(c, m: Message):
+    await m.reply(
+        "**Welcome to Pyrogram Session Generator Bot 🔐**\n\n"
+        "📲 *Send your phone number with country code*\n"
+        "Example: `+919876543210`\n\n"
+        "Bot will generate: **Pyrogram Session String (v2)**"
+    )
 
 
-@app.route("/")
-def home():
-    return html_home
+@bot.on_message(filters.private)
+async def generator(c, m: Message):
+    text = m.text.strip()
 
+    # STEP 1 → PHONE NUMBER
+    if text.startswith("+") and text[1:].isdigit():
+        phone = text
+        user_data[m.from_user.id] = {"phone": phone}
 
-@app.route("/send_code", methods=["POST"])
-def send_code():
-    phone = request.form["phone"]
+        await m.reply("📨 **Sending OTP... Please wait 5 seconds!**")
 
-    async def _send():
-        app.session_client = Client("session_gen", api_id=API_ID, api_hash=API_HASH)
-        await app.session_client.connect()
-        sent = await app.session_client.send_code(phone)
-        return True
+        async def send_code():
+            user = Client(
+                f"temp_{m.from_user.id}",
+                api_id=API_ID,
+                api_hash=API_HASH
+            )
+            await user.connect()
+            sent = await user.send_code(phone)
 
-    asyncio.run(_send())
-    return render_template_string(html_code, phone=phone)
+            user_data[m.from_user.id]["client"] = user
+            user_data[m.from_user.id]["sent"] = sent
 
+            await m.reply("✅ OTP sent!\nNow send the **OTP code** like: `12345`")
 
-@app.route("/verify_code", methods=["POST"])
-def verify_code():
-    phone = request.form["phone"]
-    code = request.form["code"]
-    password = request.form.get("password")
+        await asyncio.create_task(send_code())
+        return
 
-    async def _login():
-        client = app.session_client
+    # STEP 2 → OTP CODE
+    if m.from_user.id in user_data and "client" in user_data[m.from_user.id]:
+        code = text
+
+        data = user_data[m.from_user.id]
+        phone = data["phone"]
+        sent = data["sent"]
+        user: Client = data["client"]
 
         try:
-            if password:
-                await client.sign_in(phone, code, password=password)
-            else:
-                await client.sign_in(phone, code)
+            await user.sign_in(phone, sent.phone_code_hash, code)
+        except:
+            await m.reply("🔐 Your Telegram has **2FA Password**\nSend your password now.")
+            user_data[m.from_user.id]["need_password"] = True
+            return
+
+        session = await user.export_session_string()
+        await user.disconnect()
+
+        await m.reply(
+            "**🎉 Session String Generated Successfully!**\n\n"
+            f"`{session}`\n\n"
+            "⚠ Save it safely. Do NOT share it with anyone."
+        )
+
+        user_data.pop(m.from_user.id, None)
+        return
+
+    # STEP 3 → PASSWORD (2FA)
+    if m.from_user.id in user_data and user_data[m.from_user.id].get("need_password"):
+        password = text
+        data = user_data[m.from_user.id]
+        phone = data["phone"]
+        sent = data["sent"]
+        user: Client = data["client"]
+
+        try:
+            await user.sign_in(
+                phone,
+                sent.phone_code_hash,
+                password=password
+            )
         except Exception as e:
-            return f"Login error: {e}"
+            return await m.reply(f"❌ Wrong Password: {e}")
 
-        session = await client.export_session_string()
-        await client.disconnect()
-        return session
+        session = await user.export_session_string()
+        await user.disconnect()
 
-    session_string = asyncio.run(_login())
+        await m.reply(
+            "**🎉 Session String Generated with Password!**\n\n"
+            f"`{session}`"
+        )
 
-    return render_template_string(html_result, session=session_string)
+        user_data.pop(m.from_user.id, None)
+        return
 
 
-if __name__ == "__main__":
-    app.run(debug=True)
+print("🔥 SESSION GENERATOR BOT STARTED 🔥")
+bot.run()
